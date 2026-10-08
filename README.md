@@ -36,7 +36,7 @@ python bot.py --url https://pollev.com/YOUR_PRESENTER
 Login through the browser that launches. Login state is saved in the browser the proj uses.
 Terminate with ^C.
 
-The default selectors now recognize the Poll Everywhere 1.0 vote-button layout
+The built-in selectors recognize the Poll Everywhere 1.0 vote-button layout
 captured from `https://pollev.com/kyragan244`. The bot uses the activity's response
 URL as its identity, reads the question heading rather than "Live results", and
 detects an existing vote from `data-vote-count`. Vote buttons submit immediately;

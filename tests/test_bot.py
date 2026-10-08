@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bot import BrowserError, DEFAULT_SELECTORS, History, Watcher, main, parse_args, poll_key
+from bot import BrowserError, History, Watcher, main, parse_args, poll_key
 
 URL = 'https://pollev.com/test'
 
@@ -32,7 +32,7 @@ class StateTests(unittest.TestCase):
         self.submit.count.return_value = 0
         self.page.locator.return_value.filter.return_value.get_by_role.return_value.filter.return_value.count.return_value = 0
         self.page.wait_for_function.side_effect = BrowserError('Unconfirmed')
-        self.watcher = Watcher(self.page, URL, DEFAULT_SELECTORS, self.history)
+        self.watcher = Watcher(self.page, URL, self.history)
 
     def test_three_polls_and_repeated_updates(self):
         for identity in ('1', '2', '3'):
@@ -45,7 +45,7 @@ class StateTests(unittest.TestCase):
     def test_restart_does_not_retry_uncertain_vote(self):
         self.watcher.tick()
         history = History(self.history.path)
-        Watcher(self.page, URL, DEFAULT_SELECTORS, history).tick()
+        Watcher(self.page, URL, history).tick()
         self.assertEqual(self.option.check.call_count, 1)
 
     def test_write_precedes_click(self):
@@ -180,7 +180,7 @@ class BrowserTests(unittest.TestCase):
         # Serve fixtures through intercepted localhost requests; no external traffic.
         self.page.route('http://localhost/**', lambda route: route.fulfill(body='<main></main>', content_type='text/html'))
         self.page.goto('http://localhost/polls')
-        self.watcher = Watcher(self.page, 'http://localhost/polls', DEFAULT_SELECTORS,
+        self.watcher = Watcher(self.page, 'http://localhost/polls',
                                History(Path(self.temp.name) / 'history.json'))
 
     def render(self, identity='1', extra='', hidden=False):

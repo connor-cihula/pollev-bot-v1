@@ -27,7 +27,7 @@ except ModuleNotFoundError as error:
 
 LOG = logging.getLogger("pollev")
 BASE = Path(__file__).resolve().parent
-DEFAULT_SELECTORS = {
+SELECTORS = {
     "root": "main, [role='main']",
     "question": "h1, h2, [data-question]",
     "options": "input[type='radio'], [role='radio'], [data-choice-id], [data-response-option], [data-activity-type='multiple_choice_poll'] button.component-response-multiple-choice__option__vote",
@@ -37,7 +37,7 @@ DEFAULT_SELECTORS = {
 }
 
 # Read all relevant state in one evaluation; never guess that an arbitrary button
-# is an answer. Custom selectors support button-based participant pages.
+# is an answer. Selectors include the observed Poll Everywhere vote buttons.
 SNAPSHOT = r"""cfg => {
     const visible = e => !!e && [...e.getClientRects()].some(r => r.width > 0 && r.height > 0) &&
         getComputedStyle(e).visibility !== 'hidden';
@@ -74,7 +74,7 @@ SNAPSHOT = r"""cfg => {
         return {status: 'waiting', reason: 'No recognizable multiple-choice answers'};
     // Native radio + its wrapper must not be counted twice.
     if (nodes.some(e => nodes.some(other => e !== other && e.contains(other))))
-        return {status: 'waiting', reason: 'Overlapping answer selectors; refine configuration'};
+        return {status: 'waiting', reason: 'Overlapping answer controls; unsupported page layout'};
     const q = (legacy && legacy.querySelector('.component-response-header__title')) ||
         [...root.querySelectorAll(cfg.question)].find(visible);
     if (!q || !q.innerText.trim()) return {status: 'waiting', reason: 'No question identifier'};
@@ -129,14 +129,14 @@ class History:
 
 
 class Watcher:
-    def __init__(self, page, url: str, selectors: dict, history: History):
-        self.page, self.url, self.selectors, self.history = page, url, selectors, history
+    def __init__(self, page, url: str, history: History):
+        self.page, self.url, self.history = page, url, history
         self.reported = set()
         self.last_reason = None
         self.attempted = self.confirmed = 0
 
     def snapshot(self):
-        return self.page.evaluate(SNAPSHOT, self.selectors)
+        return self.page.evaluate(SNAPSHOT, SELECTORS)
 
     def tick(self):
         if urlsplit(self.page.url).hostname != urlsplit(self.url).hostname:
@@ -163,8 +163,8 @@ class Watcher:
         if poll['disabled']:
             return
         # Resolve a concrete DOM handle and recheck the poll before interaction.
-        root = self.page.locator(self.selectors['root']).filter(visible=True)
-        option = root.locator(self.selectors['options']).nth(poll['options'][0]['index'])
+        root = self.page.locator(SELECTORS['root']).filter(visible=True)
+        option = root.locator(SELECTORS['options']).nth(poll['options'][0]['index'])
         handle = option.element_handle()
         fresh = self.snapshot()
         if (not handle or fresh['status'] != 'poll' or poll_key(self.url, fresh) != key
@@ -186,7 +186,7 @@ class Watcher:
             handle.click(timeout=3000)
         after = self.snapshot()
         if after['status'] == 'poll' and poll_key(self.url, after) == key and not after.get('legacy'):
-            submit = root.locator(self.selectors['submit']).filter(visible=True)
+            submit = root.locator(SELECTORS['submit']).filter(visible=True)
             if not submit.count():
                 submit = root.get_by_role('button', name=re.compile(r'^(submit|send|vote)( response| answer)?$', re.I)).filter(visible=True)
             if submit.count() == 1 and submit.is_enabled():
@@ -199,7 +199,7 @@ class Watcher:
             self.page.wait_for_function(
                 'cfg => { const poll = (' + SNAPSHOT + ')(cfg); '
                 "return poll.status === 'poll' && poll.confirmed; }",
-                arg=self.selectors, timeout=3000)
+                arg=SELECTORS, timeout=3000)
             current = self.snapshot()
             if current['status'] == 'poll' and poll_key(self.url, current) == key:
                 self.history.record(key, 'confirmed')
@@ -215,7 +215,6 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', required=True, help='Poll Everywhere participant URL')
     parser.add_argument('--interval', type=float, default=2, help='Seconds between checks (default: 2)')
-    parser.add_argument('--config', type=Path, help='JSON CSS selector overrides')
     args = parser.parse_args(argv)
     parts = urlsplit(args.url)
     if parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password:
@@ -229,18 +228,10 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
-    selectors = dict(DEFAULT_SELECTORS)
     watcher = None
     try:
         if sync_playwright is None:
             raise ValueError('Playwright is missing. Install it with: python -m pip install -r requirements.txt')
-        if args.config:
-            overrides = json.loads(args.config.read_text())
-            if not isinstance(overrides, dict) or set(overrides) - set(selectors) or any(
-                not isinstance(v, str) or not v.strip() for v in overrides.values()
-            ):
-                raise ValueError('Config must contain known selector names and nonempty CSS strings')
-            selectors.update(overrides)
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
                 str(BASE / '.local' / 'browser'), headless=False
@@ -255,7 +246,7 @@ def main(argv=None):
                 except BrowserError as error:
                     LOG.warning('Initial navigation incomplete: %s', error.message.splitlines()[0])
                 input('Finish login and open the participant page, then press Enter here to monitor: ')
-                watcher = Watcher(page, args.url, selectors, history)
+                watcher = Watcher(page, args.url, history)
                 LOG.info('Monitoring until Ctrl+C')
                 failures = 0
                 while not page.is_closed():
