@@ -129,9 +129,8 @@ class History:
 
 
 class Watcher:
-    def __init__(self, page, url: str, selectors: dict, history: History, dry_run=False):
+    def __init__(self, page, url: str, selectors: dict, history: History):
         self.page, self.url, self.selectors, self.history = page, url, selectors, history
-        self.dry_run = dry_run
         self.reported = set()
         self.last_reason = None
         self.attempted = self.confirmed = 0
@@ -156,18 +155,12 @@ class Watcher:
         if key in self.history.entries:
             return
         if poll['answered']:
-            if not self.dry_run:
-                self.history.record(key, 'already-answered')
+            self.history.record(key, 'already-answered')
             if key not in self.reported:
                 LOG.info('Skipping already-answered poll')
                 self.reported.add(key)
             return
         if poll['disabled']:
-            return
-        if self.dry_run:
-            if key not in self.reported:
-                LOG.info('Dry run: would select first answer: %s', poll['options'][0]['text'])
-                self.reported.add(key)
             return
         # Resolve a concrete DOM handle and recheck the poll before interaction.
         root = self.page.locator(self.selectors['root']).filter(visible=True)
@@ -223,7 +216,6 @@ def parse_args(argv=None):
     parser.add_argument('--url', required=True, help='Poll Everywhere participant URL')
     parser.add_argument('--interval', type=float, default=2, help='Seconds between checks (default: 2)')
     parser.add_argument('--config', type=Path, help='JSON CSS selector overrides')
-    parser.add_argument('--dry-run', action='store_true', help='Detect and log polls without voting')
     args = parser.parse_args(argv)
     parts = urlsplit(args.url)
     if parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password:
@@ -263,8 +255,8 @@ def main(argv=None):
                 except BrowserError as error:
                     LOG.warning('Initial navigation incomplete: %s', error.message.splitlines()[0])
                 input('Finish login and open the participant page, then press Enter here to monitor: ')
-                watcher = Watcher(page, args.url, selectors, history, args.dry_run)
-                LOG.info('Monitoring until Ctrl+C%s', ' (dry run)' if args.dry_run else '')
+                watcher = Watcher(page, args.url, selectors, history)
+                LOG.info('Monitoring until Ctrl+C')
                 failures = 0
                 while not page.is_closed():
                     try:

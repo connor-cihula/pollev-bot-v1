@@ -83,13 +83,6 @@ class StateTests(unittest.TestCase):
             self.watcher.tick()
         self.option.check.assert_not_called()
 
-    def test_dry_run_does_not_vote_or_record_attempt(self):
-        self.watcher.dry_run = True
-        self.watcher.tick()
-        self.watcher.tick()
-        self.option.check.assert_not_called()
-        self.assertFalse(self.history.entries)
-
     def test_changed_poll_before_click(self):
         self.page.evaluate.side_effect = [poll('1'), poll('2')]
         self.watcher.tick()
@@ -229,15 +222,11 @@ class BrowserTests(unittest.TestCase):
             self.watcher.tick()
             self.assertEqual(self.page.evaluate('window.clicks'), 0)
 
-    def test_already_answered_and_dry_run(self):
+    def test_already_answered(self):
         self.render()
         self.page.locator('input').nth(1).check()
         self.watcher.tick()
         self.assertEqual(self.watcher.attempted, 0)
-        self.render('2')
-        self.watcher.dry_run = True
-        self.watcher.tick()
-        self.assertEqual(self.page.evaluate('window.clicks'), 0)
 
     def render_legacy(self, identity='fixture-poll', voted=False, locked=False):
         # Sanitized structural excerpt of the user's before/after HTML. No

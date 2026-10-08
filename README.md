@@ -47,8 +47,6 @@ navigation tabs and undo buttons are excluded. Locked polls are skipped.
 
 - `--interval <number>`: replace <number> with an int. Default to checking updates every 2 seconds.ng sign-in or navigation to another hostname it pauses voting.
 
-- `python bot.py --url https://pollev.com/YOUR_PRESENTER --dry-run` inspect detection without casting a vote.
-
 
 ## Testing
 
