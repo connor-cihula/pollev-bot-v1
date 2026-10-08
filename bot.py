@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import time
 from urllib.parse import urlsplit, urlunsplit
 
 try:
@@ -129,8 +130,9 @@ class History:
 
 
 class Watcher:
-    def __init__(self, page, url: str, history: History):
+    def __init__(self, page, url: str, history: History, repeat=False):
         self.page, self.url, self.history = page, url, history
+        self.repeat = repeat
         self.reported = set()
         self.last_reason = None
         self.attempted = self.confirmed = 0
@@ -152,9 +154,9 @@ class Watcher:
             return
         self.last_reason = None
         key = poll_key(self.url, poll)
-        if key in self.history.entries:
+        if not self.repeat and key in self.history.entries:
             return
-        if poll['answered']:
+        if not self.repeat and poll['answered']:
             self.history.record(key, 'already-answered')
             if key not in self.reported:
                 LOG.info('Skipping already-answered poll')
@@ -168,15 +170,19 @@ class Watcher:
         handle = option.element_handle()
         fresh = self.snapshot()
         if (not handle or fresh['status'] != 'poll' or poll_key(self.url, fresh) != key
-                or fresh['answered'] or fresh['disabled']):
+                or (fresh['answered'] and not self.repeat) or fresh['disabled']):
             return
         # Persist BEFORE the click. A timeout may occur after the server accepted
         # the vote, so neither reconnection nor restart may automatically retry.
-        self.history.record(key, 'attempted')
+        if key not in self.history.entries:
+            self.history.record(key, 'attempted')
         self.attempted += 1
         if handle.evaluate("e => e.tagName === 'INPUT' && e.type === 'radio'"):
             if handle.is_visible():
-                handle.check(timeout=3000)
+                if self.repeat:
+                    handle.click(timeout=3000)
+                else:
+                    handle.check(timeout=3000)
             else:
                 label = handle.evaluate_handle("e => [...e.labels].find(l => l.getClientRects().length)").as_element()
                 if label is None:
@@ -194,6 +200,10 @@ class Watcher:
                 current = self.snapshot()
                 if submit_handle and current['status'] == 'poll' and poll_key(self.url, current) == key:
                     submit_handle.click(timeout=3000)
+        if self.repeat:
+            # Don't serialize repeated clicks behind a three-second confirmation
+            # wait. A click is an attempt, not proof of a distinct server response.
+            return
         # Checked radios alone are not proof the server accepted the response.
         try:
             self.page.wait_for_function(
@@ -215,6 +225,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', required=True, help='Poll Everywhere participant URL')
     parser.add_argument('--interval', type=float, default=2, help='Seconds between checks (default: 2)')
+    parser.add_argument('--repeat', nargs='?', type=int, const=20, default=None,
+                        metavar='N', help='Repeat first-answer attempts N times per second (default: 20) until Ctrl+C')
     args = parser.parse_args(argv)
     parts = urlsplit(args.url)
     if parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password:
@@ -222,7 +234,17 @@ def parse_args(argv=None):
     args.url = urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip('/'), parts.query, ''))
     if not math.isfinite(args.interval) or args.interval < 0.5:
         parser.error('--interval must be finite and at least 0.5 seconds')
+    if args.repeat is not None and args.repeat < 1:
+        parser.error('--repeat N must be a positive integer')
     return args
+
+
+def next_repeat_slot(previous: float, now: float, period: float) -> float:
+    """Keep a steady rate and discard missed slots instead of sending bursts."""
+    target = previous + period
+    if target < now:
+        target += math.ceil((now - target) / period) * period
+    return target
 
 
 def main(argv=None):
@@ -246,8 +268,13 @@ def main(argv=None):
                 except BrowserError as error:
                     LOG.warning('Initial navigation incomplete: %s', error.message.splitlines()[0])
                 input('Finish login and open the participant page, then press Enter here to monitor: ')
-                watcher = Watcher(page, args.url, history)
-                LOG.info('Monitoring until Ctrl+C')
+                watcher = Watcher(page, args.url, history, repeat=args.repeat is not None)
+                if args.repeat is None:
+                    LOG.info('Monitoring until Ctrl+C')
+                else:
+                    LOG.info('Repeating first-answer attempts at up to %d/second until Ctrl+C', args.repeat)
+                period = 1 / args.repeat if args.repeat is not None else args.interval
+                slot = time.monotonic()
                 failures = 0
                 while not page.is_closed():
                     try:
@@ -257,9 +284,17 @@ def main(argv=None):
                         if page.is_closed():
                             break
                         failures += 1
-                        LOG.warning('Browser error; any recorded attempt will not be retried: %s', error.message.splitlines()[0])
+                        LOG.warning('Browser error%s: %s',
+                                    '; pausing repeat attempts' if watcher.repeat else '; any recorded attempt will not be retried',
+                                    error.message.splitlines()[0])
+                    if args.repeat is not None and not failures:
+                        slot = next_repeat_slot(slot, time.monotonic(), period)
+                        delay = max(0, slot - time.monotonic())
+                    else:
+                        delay = min(30, args.interval * 2 ** min(failures, 4))
+                        slot = time.monotonic() + delay
                     try:
-                        page.wait_for_timeout(min(30, args.interval * 2 ** min(failures, 4)) * 1000)
+                        page.wait_for_timeout(delay * 1000)
                     except BrowserError:
                         if page.is_closed():
                             break
@@ -285,7 +320,10 @@ def main(argv=None):
         return 1
     finally:
         if watcher:
-            LOG.info('Session: %d attempts, %d visibly confirmed', watcher.attempted, watcher.confirmed)
+            if watcher.repeat:
+                LOG.info('Session: %d repeat attempts; server acceptance not counted', watcher.attempted)
+            else:
+                LOG.info('Session: %d attempts, %d visibly confirmed', watcher.attempted, watcher.confirmed)
     return 0
 
 

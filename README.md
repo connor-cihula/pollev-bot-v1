@@ -2,6 +2,8 @@
 
 Monitors a Poll Everywhere URL and votes the first answer anytime a new poll is posted. Designed for 1.0 version used in class, but is compatible with bar poll in ver. 2.0.
 
+Can also keep sending responses to the first answer every second til you ^C it, default is 20 per second. Untested feature.
+
 AI comments:
 
 The built-in selectors recognize the Poll Everywhere 1.0 vote-button layout
@@ -49,6 +51,15 @@ Terminate with ^C.
 ## Options
 
 - `--interval <number>`: replace <number> with an int. Default is checking every 2 seconds.
+
+- `--repeat [number]`: keep voting the first answer til you ^C it. Default is 20 attempts per second, or use `--repeat 5` for 5 per second. Keeps going on the same poll and follows new ones too. Untested.
+
+```sh
+python bot.py --url https://pe.app/elemehnop --repeat
+python bot.py --url https://pe.app/elemehnop --repeat 5
+```
+
+Poll needs to allow multiple responses. Pauses if it's locked or the answer is disabled. Actual responses per second depend on how fast the page accepts clicks, no guarantees it'll hit 20. `--interval` only controls waiting after errors in repeat mode.
 
 
 ## Testing

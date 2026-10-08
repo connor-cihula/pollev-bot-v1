@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bot import BrowserError, History, Watcher, main, parse_args, poll_key
+from bot import BrowserError, History, Watcher, main, next_repeat_slot, parse_args, poll_key
 
 URL = 'https://pollev.com/test'
 
@@ -154,6 +154,72 @@ class StateTests(unittest.TestCase):
             self.assertEqual(main(['--url', URL]), 0)
         context.close.assert_called_once()
 
+    def test_repeat_defaults_and_custom_rate(self):
+        self.assertIsNone(parse_args(['--url', URL]).repeat)
+        self.assertEqual(parse_args(['--url', URL, '--repeat']).repeat, 20)
+        self.assertEqual(parse_args(['--url', URL, '--repeat', '5']).repeat, 5)
+        for value in ('0', '-1', '1.5'):
+            with patch('sys.stderr'), self.assertRaises(SystemExit):
+                parse_args(['--url', URL, '--repeat', value])
+
+    def test_repeat_pacing_skips_missed_slots(self):
+        self.assertAlmostEqual(next_repeat_slot(0, .01, .05), .05)
+        self.assertAlmostEqual(next_repeat_slot(.05, .08, .05), .10)
+        self.assertAlmostEqual(next_repeat_slot(.10, .31, .05), .35)
+        self.assertAlmostEqual(next_repeat_slot(0, 3, .05), 3)
+
+    def test_repeat_votes_even_if_answered_and_in_history(self):
+        self.watcher.repeat = True
+        value = poll()
+        value['answered'] = True
+        self.page.evaluate.return_value = value
+        self.history.record(poll_key(URL, value), 'confirmed')
+        for _ in range(20):
+            self.watcher.tick()
+        self.assertEqual(self.option.click.call_count, 20)
+        self.assertEqual(self.watcher.attempted, 20)
+        self.option.check.assert_not_called()
+        self.page.wait_for_function.assert_not_called()
+
+    def test_repeat_button_clicks_first_answer_and_follows_new_polls(self):
+        self.watcher.repeat = True
+        self.option.evaluate.return_value = False
+        for identity in ('1', '2'):
+            self.page.evaluate.return_value = poll(identity)
+            for _ in range(3):
+                self.watcher.tick()
+        self.assertEqual(self.option.click.call_count, 6)
+        self.assertEqual(len(self.history.entries), 2)
+        self.assertEqual(self.watcher.confirmed, 0)
+
+    def test_repeat_pauses_when_disabled_and_resumes(self):
+        self.watcher.repeat = True
+        value = poll()
+        value['disabled'] = True
+        self.page.evaluate.return_value = value
+        self.watcher.tick()
+        self.option.click.assert_not_called()
+        value['disabled'] = False
+        self.watcher.tick()
+        self.option.click.assert_called_once()
+
+    def test_repeat_still_rechecks_identity_before_click(self):
+        self.watcher.repeat = True
+        self.page.evaluate.side_effect = [poll('1'), poll('2')]
+        self.watcher.tick()
+        self.option.click.assert_not_called()
+
+    def test_repeat_ctrl_c_closes_browser(self):
+        runtime = MagicMock()
+        context = runtime.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+        context.pages = [self.page]
+        self.page.is_closed.return_value = False
+        self.page.wait_for_timeout.side_effect = KeyboardInterrupt
+        with patch('bot.sync_playwright', runtime), patch('bot.BASE', Path(self.temp.name)), patch('builtins.input', return_value=''):
+            self.assertEqual(main(['--url', URL, '--repeat']), 0)
+        self.option.click.assert_called_once()
+        context.close.assert_called_once()
+
 
 @unittest.skipUnless(importlib.util.find_spec('playwright'), 'Playwright is not installed')
 class BrowserTests(unittest.TestCase):
@@ -282,6 +348,25 @@ class BrowserTests(unittest.TestCase):
         self.watcher.tick()
         self.assertEqual(self.watcher.attempted, 0)
         self.assertEqual(self.page.evaluate('window.voteClicks'), [0, 0, 0, 0])
+
+    def test_legacy_repeat_twenty_responses_to_first_answer(self):
+        self.render_legacy()
+        # Simulate a poll allowing multiple responses: it updates the own-vote
+        # count without disabling its response buttons after the first vote.
+        self.page.evaluate("""() => {
+            document.querySelectorAll('.component-response-multiple-choice__option__vote').forEach((button, index) => {
+                button.onclick = () => {
+                    window.voteClicks[index]++;
+                    button.parentElement.setAttribute('data-vote-count', String(window.voteClicks[index]));
+                };
+            });
+        }""")
+        self.watcher.repeat = True
+        for _ in range(20):
+            self.watcher.tick()
+        self.assertEqual(self.page.evaluate('window.voteClicks'), [20, 0, 0, 0])
+        self.assertEqual(self.watcher.attempted, 20)
+        self.assertEqual(self.page.evaluate('window.navigationClicks'), 0)
 
 
 if __name__ == '__main__':
