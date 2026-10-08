@@ -1,0 +1,8 @@
+{
+  "root": "main, [role='main']",
+  "question": "h1, h2, [data-question]",
+  "options": "input[type='radio'], [role='radio'], [data-choice-id], [data-response-option], [data-activity-type='multiple_choice_poll'] button.component-response-multiple-choice__option__vote",
+  "submit": "button[type='submit'], input[type='submit']",
+  "confirmation": "[data-response-submitted='true'], [role='status']",
+  "closed": "[data-poll-closed='true']"
+}

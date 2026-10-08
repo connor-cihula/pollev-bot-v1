@@ -1,0 +1,67 @@
+<!doctype html>
+<main id="main-content">
+  <form><button type="submit" onclick="window.navigationClicks++;return false">Live activity tab</button></form>
+  <turbo-frame id="active_tab_content">
+    <turbo-frame src="http://localhost/multiple_choice_polls/FIXTURE_POLL/respond">
+      <div id="legacy_multiple_choice_poll_instance_fixture">
+        <legacy-response-view>
+          <div class="component-response-activity" data-activity-type="multiple_choice_poll">
+            <div class="component-response-multiple-choice">
+              <div class="component-response-chart"><h2>Live results</h2></div>
+              <div class="component-response-header">
+                <h1 class="component-response-header__title">Fixture question</h1>
+                <div class="component-response-header__status" aria-live="polite">You have not responded</div>
+              </div>
+              <div class="component-response-multiple-choice__response-options">
+                <div class="component-response-multiple-choice__option">
+                  <button class="component-response-multiple-choice__option__vote" aria-label="First with 0 of your votes, option 1 of 4">
+                    <div class="component-response-multiple-choice__option__results-count">0</div>
+                    <div class="component-response-multiple-choice__option__value">First</div>
+                  </button>
+                  <button class="component-response-multiple-choice__option__undo" title="Undo vote" hidden>Undo</button>
+                </div>
+                <div class="component-response-multiple-choice__option">
+                  <button class="component-response-multiple-choice__option__vote" aria-label="Second with 0 of your votes, option 2 of 4">
+                    <div class="component-response-multiple-choice__option__results-count">0</div>
+                    <div class="component-response-multiple-choice__option__value">Second</div>
+                  </button>
+                  <button class="component-response-multiple-choice__option__undo" title="Undo vote" hidden>Undo</button>
+                </div>
+                <div class="component-response-multiple-choice__option">
+                  <button class="component-response-multiple-choice__option__vote" aria-label="Third with 0 of your votes, option 3 of 4">
+                    <div class="component-response-multiple-choice__option__results-count">0</div>
+                    <div class="component-response-multiple-choice__option__value">Third</div>
+                  </button>
+                  <button class="component-response-multiple-choice__option__undo" title="Undo vote" hidden>Undo</button>
+                </div>
+                <div class="component-response-multiple-choice__option">
+                  <button class="component-response-multiple-choice__option__vote" aria-label="Fourth with 0 of your votes, option 4 of 4">
+                    <div class="component-response-multiple-choice__option__results-count">0</div>
+                    <div class="component-response-multiple-choice__option__value">Fourth</div>
+                  </button>
+                  <button class="component-response-multiple-choice__option__undo" title="Undo vote" hidden>Undo</button>
+                </div>
+              </div>
+              <button class="component-response-multiple-choice__undo" style="display:none">Clear last response</button>
+            </div>
+          </div>
+        </legacy-response-view>
+      </div>
+    </turbo-frame>
+  </turbo-frame>
+</main>
+<script>
+  window.voteClicks = [0, 0, 0, 0];
+  window.navigationClicks = 0;
+  document.querySelectorAll('.component-response-multiple-choice__option__vote').forEach((button, index) => {
+    button.onclick = () => {
+      window.voteClicks[index]++;
+      button.parentElement.setAttribute('data-vote-count', '1');
+      button.parentElement.classList.add('component-response-multiple-choice__option--vote');
+      button.querySelector('.component-response-multiple-choice__option__results-count').innerText = '1';
+      button.setAttribute('aria-label', button.querySelector('.component-response-multiple-choice__option__value').innerText + ' with your vote, option ' + (index + 1) + ' of 4');
+      document.querySelector('.component-response-header__status').innerText = 'This poll is locked.';
+      document.querySelectorAll('.component-response-multiple-choice__option__vote').forEach(e => e.disabled = true);
+    };
+  });
+</script>
