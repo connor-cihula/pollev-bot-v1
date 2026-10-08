@@ -1,6 +1,14 @@
 ## Description
 
-Monitors a Poll Everywhere URL and votes the first answer anytime a new poll is posted
+Monitors a Poll Everywhere URL and votes the first answer anytime a new poll is posted. Designed for 1.0 version used in class, but is compatible with bar poll in ver. 2.0.
+
+AI comments:
+
+The built-in selectors recognize the Poll Everywhere 1.0 vote-button layout
+captured from `https://pollev.com/kyragan244`. The bot uses the activity's response
+URL as its identity, reads the question heading rather than "Live results", and
+detects an existing vote from `data-vote-count`. Vote buttons submit immediately;
+navigation tabs and undo buttons are excluded. Locked polls are skipped.
 
 
 ## Setup
@@ -30,22 +38,17 @@ chromium` (may require administrator privileges).
 ## Run
 
 ```sh
-python bot.py --url https://pollev.com/YOUR_PRESENTER
+python bot.py --url https://pollev.com/kyragan244
 ```
+Or use whatever URL desired, no guarantees, might only work on bar polls.
 
-Login through the browser that launches. Login state is saved in the browser the proj uses.
+Login through the browser that launches. Login state is saved in the browser the proj uses. Once monitoring the right page, hit enter in the terminal. In all runs except the first, this should be as smooth as enter and enter.
+
 Terminate with ^C.
-
-The built-in selectors recognize the Poll Everywhere 1.0 vote-button layout
-captured from `https://pollev.com/kyragan244`. The bot uses the activity's response
-URL as its identity, reads the question heading rather than "Live results", and
-detects an existing vote from `data-vote-count`. Vote buttons submit immediately;
-navigation tabs and undo buttons are excluded. Locked polls are skipped.
-
 
 ## Options
 
-- `--interval <number>`: replace <number> with an int. Default to checking updates every 2 seconds.ng sign-in or navigation to another hostname it pauses voting.
+- `--interval <number>`: replace <number> with an int. Default is checking every 2 seconds.
 
 
 ## Testing
