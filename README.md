@@ -1,6 +1,6 @@
 ## Description
 
-Monitors a Poll Everywhere URL and votes the first answer anytime a new poll is posted. Designed for 1.0 version used in class, but is compatible with bar poll in ver. 2.0.
+Monitors a Poll Everywhere URL and votes the first answer anytime a new poll is posted. Designed for 1.0 version used in class, don't think it works on 2.0.
 
 Can also keep sending responses to the first answer every second til you ^C it, default is 20 per second. Untested feature.
 
