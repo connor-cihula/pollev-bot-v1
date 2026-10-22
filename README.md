@@ -40,7 +40,7 @@ chromium` (may require administrator privileges).
 ## Run
 
 ```sh
-python bot.py --url https://pollev.com/kyragan244
+.venv/bin/python bot.py --url https://pollev.com/kyragan244
 ```
 Or use whatever URL desired, no guarantees, might only work on bar polls.
 
