@@ -7,7 +7,7 @@ Can also keep sending responses to the first answer every second til you ^C it, 
 AI comments:
 
 The built-in selectors recognize the Poll Everywhere 1.0 vote-button layout
-captured from `https://pollev.com/kyragan244`. The bot uses the activity's response
+captured from a participant page. The bot uses the activity's response
 URL as its identity, reads the question heading rather than "Live results", and
 detects an existing vote from `data-vote-count`. Vote buttons submit immediately;
 navigation tabs and undo buttons are excluded. Locked polls are skipped.
@@ -40,7 +40,7 @@ chromium` (may require administrator privileges).
 ## Run
 
 ```sh
-.venv/bin/python bot.py --url https://pollev.com/kyragan244
+.venv/bin/python bot.py --url https://pollev.com/YOUR_PRESENTER
 ```
 Or use whatever URL desired, no guarantees, might only work on bar polls.
 
@@ -55,7 +55,7 @@ Terminate with ^C.
 - `--count N`: attempt the first answer exactly N times per poll when it stays enabled. For five attempts:
 
 ```sh
-.venv/bin/python bot.py --url https://pollev.com/kyragan244 --count 5
+.venv/bin/python bot.py --url https://pollev.com/YOUR_PRESENTER --count 5
 ```
 
 Attempts run back to back with no added delay, as fast as the page accepts clicks.
@@ -80,7 +80,7 @@ combined.
   times, to the first answer of each poll. For three batches of five (15 total):
 
 ```sh
-.venv/bin/python bot.py --url https://pollev.com/kyragan244 --count_batches 5 3
+.venv/bin/python bot.py --url https://pollev.com/YOUR_PRESENTER --count_batches 5 3
 ```
 
 Both numbers must be positive integers. Batches run consecutively with no added
