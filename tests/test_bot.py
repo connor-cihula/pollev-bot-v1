@@ -3,10 +3,11 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bot import BrowserError, History, Watcher, main, next_repeat_slot, parse_args, poll_key
+from bot import BrowserError, History, SNAPSHOT, Watcher, main, next_repeat_slot, parse_args, poll_key
 
 URL = 'https://pollev.com/test'
 
@@ -220,6 +221,158 @@ class StateTests(unittest.TestCase):
         self.option.click.assert_called_once()
         context.close.assert_called_once()
 
+    def test_count_args(self):
+        self.assertIsNone(parse_args(['--url', URL]).count)
+        self.assertEqual(parse_args(['--url', URL, '--count', '5']).count, 5)
+        for extra in (['--count'], ['--count', '0'], ['--count', '-1'],
+                      ['--count', '1.5'], ['--count', '5', '--repeat']):
+            with patch('sys.stderr'), self.assertRaises(SystemExit):
+                parse_args(['--url', URL, *extra])
+
+    def test_count_batches_args(self):
+        self.assertIsNone(parse_args(['--url', URL]).count_batches)
+        self.assertEqual(parse_args(['--url', URL, '--count_batches', '5', '3']).count_batches, [5, 3])
+        for extra in ([], ['5'], ['5', '3', '2'], ['0', '3'], ['5', '-1'],
+                      ['1.5', '3'], ['5', '3', '--count', '5'], ['5', '3', '--repeat']):
+            with self.subTest(extra=extra), patch('sys.stderr'), self.assertRaises(SystemExit):
+                parse_args(['--url', URL, '--count_batches', *extra])
+
+    def test_count_batches_sizes_cap_and_new_polls(self):
+        value = poll(legacy=True)
+        limits = []
+        def evaluate(script, arg):
+            if script == SNAPSHOT:
+                return value
+            limits.append(arg['limit'])
+            value['disabled'] = True  # Pending requests must not stall batches.
+            return dict(attempted=arg['limit'], elapsed_ms=0, transport='app')
+        self.page.evaluate.side_effect = evaluate
+        watcher = Watcher(self.page, URL, self.history, count_batches=(2, 3))
+        for identity in ('1', '2', '1'):
+            value['id'] = identity
+            for _ in range(4):
+                watcher.tick()
+        self.assertEqual(limits, [2] * 6)
+        self.assertEqual(watcher.attempted, 12)
+
+    def test_count_batches_main_runs_consecutively(self):
+        runtime = MagicMock()
+        context = runtime.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+        context.pages = [self.page]
+        self.page.is_closed.side_effect = [False] * 4 + [True]
+        def evaluate(script, arg):
+            if script == SNAPSHOT:
+                return poll(legacy=True)
+            self.page.wait_for_timeout.assert_not_called()
+            self.assertEqual(arg['limit'], 2)
+            return dict(attempted=2, elapsed_ms=0, transport='app')
+        self.page.evaluate.side_effect = evaluate
+        with patch('bot.sync_playwright', runtime), patch('bot.BASE', Path(self.temp.name)), patch('builtins.input', return_value=''):
+            self.assertEqual(main(['--url', URL, '--count_batches', '2', '3']), 0)
+        self.page.wait_for_timeout.assert_called_once_with(2000)
+        context.close.assert_called_once()
+
+    def test_count_caps_attempts_even_if_already_answered(self):
+        self.watcher.count = 5
+        value = poll()
+        value['answered'] = True
+        self.page.evaluate.return_value = value
+        self.history.record(poll_key(URL, value), 'confirmed')
+        for _ in range(8):
+            self.watcher.tick()
+        self.assertEqual(self.option.click.call_count, 5)
+        self.assertEqual(self.watcher.attempted, 5)
+        self.option.check.assert_not_called()
+        self.page.wait_for_function.assert_not_called()
+
+    def test_count_starts_fresh_after_restart(self):
+        self.watcher.count = 5
+        for _ in range(5):
+            self.watcher.tick()
+        restarted = Watcher(self.page, URL, History(self.history.path), count=5)
+        for _ in range(5):
+            restarted.tick()
+        self.assertEqual(self.option.click.call_count, 10)
+        self.assertEqual(restarted.attempted, 5)
+        # Returning to default mode must not add another attempt either.
+        Watcher(self.page, URL, History(self.history.path)).tick()
+        self.option.check.assert_not_called()
+
+    def test_count_ignores_old_saved_budget(self):
+        key = poll_key(URL, poll())
+        self.history.record(key, 'attempted')
+        for index in range(1, 6):
+            self.history.record(f'{key}:count:{index}', 'attempted')
+        self.watcher.count = 5
+        for _ in range(8):
+            self.watcher.tick()
+        self.assertEqual(self.option.click.call_count, 5)
+
+    def test_count_reserves_budget_before_uncertain_click(self):
+        self.watcher.count = 5
+        def fail(**kwargs):
+            saved = History(self.history.path)
+            key = poll_key(URL, poll())
+            self.assertEqual(saved.entries[key], 'attempted')
+            self.assertEqual(self.watcher.count_attempts[key], 1)
+            raise BrowserError('Uncertain click')
+        self.option.click.side_effect = fail
+        with self.assertRaises(BrowserError):
+            self.watcher.tick()
+        self.option.click.side_effect = None
+        for _ in range(6):
+            self.watcher.tick()
+        self.assertEqual(self.option.click.call_count, 5)
+
+    def test_count_budget_is_per_poll_and_can_be_increased(self):
+        self.watcher.count = 5
+        for identity in ('1', '2', '1'):
+            self.page.evaluate.return_value = poll(identity)
+            for _ in range(6):
+                self.watcher.tick()
+        self.assertEqual(self.option.click.call_count, 10)
+        self.watcher.count = 6
+        self.watcher.tick()
+        self.watcher.tick()
+        self.assertEqual(self.option.click.call_count, 11)
+
+    def test_uncertain_burst_is_not_repeated(self):
+        self.watcher.count = 5
+        value = poll(legacy=True)
+        self.page.evaluate.side_effect = [value, BrowserError('Browser context lost after dispatch')]
+        with self.assertRaises(BrowserError):
+            self.watcher.tick()
+        self.page.evaluate.side_effect = None
+        self.page.evaluate.return_value = value
+        self.watcher.tick()
+        self.assertEqual(self.watcher.attempted, 5)
+        self.assertEqual(self.watcher.count_attempts[poll_key(URL, value)], 5)
+        self.assertEqual(self.page.evaluate.call_count, 3)
+
+    def test_count_does_not_consume_budget_while_disabled_or_changing(self):
+        self.watcher.count = 5
+        value = poll()
+        value['disabled'] = True
+        self.page.evaluate.return_value = value
+        self.watcher.tick()
+        self.page.evaluate.side_effect = [poll('1'), poll('2')]
+        self.watcher.tick()
+        self.assertFalse(self.history.entries)
+        self.option.click.assert_not_called()
+
+    def test_count_main_sends_without_waiting_then_uses_idle_interval(self):
+        runtime = MagicMock()
+        context = runtime.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+        context.pages = [self.page]
+        self.page.is_closed.side_effect = [False] * 7 + [True]
+        self.option.click.side_effect = lambda **kwargs: self.page.wait_for_timeout.assert_not_called()
+        with patch('bot.sync_playwright', runtime), patch('bot.BASE', Path(self.temp.name)), patch('builtins.input', return_value=''):
+            self.assertEqual(main(['--url', URL, '--count', '5', '--interval', '0.5']), 0)
+        self.assertEqual(self.option.click.call_count, 5)
+        self.assertEqual(self.page.wait_for_timeout.call_count, 2)
+        self.assertTrue(all(call.args == (500,) for call in self.page.wait_for_timeout.call_args_list))
+        context.close.assert_called_once()
+
 
 @unittest.skipUnless(importlib.util.find_spec('playwright'), 'Playwright is not installed')
 class BrowserTests(unittest.TestCase):
@@ -367,6 +520,198 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate('window.voteClicks'), [20, 0, 0, 0])
         self.assertEqual(self.watcher.attempted, 20)
         self.assertEqual(self.page.evaluate('window.navigationClicks'), 0)
+
+    def test_legacy_count_five_responses_to_first_answer(self):
+        self.render_legacy()
+        self.page.evaluate("""() => {
+            document.querySelectorAll('.component-response-multiple-choice__option__vote').forEach((button, index) => {
+                button.onclick = () => {
+                    window.voteClicks[index]++;
+                    button.parentElement.setAttribute('data-vote-count', String(window.voteClicks[index]));
+                };
+            });
+        }""")
+        self.watcher.count = 5
+        started = time.perf_counter()
+        self.watcher.tick()
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 0.5, f'Five-answer burst took {elapsed:.3f}s')
+        for _ in range(3):
+            self.watcher.tick()
+        self.assertEqual(self.page.evaluate('window.voteClicks'), [5, 0, 0, 0])
+        self.assertEqual(self.watcher.attempted, 5)
+        self.assertEqual(self.page.evaluate('window.navigationClicks'), 0)
+
+    def test_legacy_count_reacquires_button_after_render(self):
+        self.render_legacy()
+        self.page.evaluate("""() => {
+            const wire = button => {
+                button.onclick = () => {
+                    window.voteClicks[0]++;
+                    const replacement = button.cloneNode(true);
+                    button.replaceWith(replacement);
+                    wire(replacement);
+                };
+            };
+            wire(document.querySelector('.component-response-multiple-choice__option__vote'));
+        }""")
+        self.watcher.count = 5
+        self.watcher.tick()
+        self.assertEqual(self.page.evaluate('window.voteClicks'), [5, 0, 0, 0])
+
+    def test_legacy_count_stops_burst_when_poll_changes(self):
+        self.render_legacy()
+        self.page.evaluate("""() => {
+            const button = document.querySelector('.component-response-multiple-choice__option__vote');
+            button.onclick = () => {
+                window.voteClicks[0]++;
+                document.querySelector('turbo-frame[src]').setAttribute('src', '/multiple_choice_polls/new/respond');
+            };
+        }""")
+        self.watcher.count = 5
+        self.watcher.tick()
+        self.assertEqual(self.page.evaluate('window.voteClicks'), [1, 0, 0, 0])
+        self.assertEqual(self.watcher.attempted, 1)
+
+    def test_legacy_count_stops_if_poll_locks_after_first_vote(self):
+        self.render_legacy()
+        self.watcher.count = 5
+        for _ in range(6):
+            self.watcher.tick()
+        self.assertEqual(self.page.evaluate('window.voteClicks'), [1, 0, 0, 0])
+        self.assertEqual(self.watcher.attempted, 1)
+
+    def render_pending_legacy(self, maximum=0, per_option=0):
+        self.render_legacy()
+        self.page.evaluate("""({maximum, perOption}) => {
+            // Reproduce the observed legacy app contract: each 'result' event
+            // saves one result and disables all buttons until requests finish.
+            // Keep each response pending for a second to expose serialization.
+            window.dispatches = [];
+            window.completed = 0;
+            const records = [];
+            const options = [1, 2, 3, 4].map(id => ({id}));
+            const buttons = [...document.querySelectorAll('.component-response-multiple-choice__option__vote')];
+            const update = () => {
+                buttons.forEach(b => b.disabled = records.some(r => r.has('isPending')));
+            };
+            const results = {
+                get length() {return records.length;},
+                filter: fn => records.filter(fn),
+                add: attrs => {
+                    const result = {
+                        attrs, get: key => attrs[key],
+                        has: key => Object.hasOwn(attrs, key)
+                    };
+                    records.push(result);
+                    return result;
+                }
+            };
+            const view = {trigger: (event, result, option) => {
+                if (event !== 'result') throw new Error('Unexpected event');
+                result.attrs.isPending = true;
+                update();
+                window.dispatches.push({time: performance.now(), option: option.id});
+                fetch('/responses', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({option_id: result.get('option_id')})
+                }).then(() => setTimeout(() => {
+                    delete result.attrs.isPending;
+                    window.completed++;
+                    update();
+                }, 1000));
+            }};
+            const model = {
+                type: () => 'multiple_choice_poll',
+                get: key => ({max_votes: maximum, type_options: {responses_per_option: perOption}})[key],
+                isStarted: () => true, isWebEnabled: () => true, isMaxedOut: () => false,
+                results, mcpOptions: {at: index => options[index]}
+            };
+            document.querySelector('legacy-response-view').responseView = {model, view};
+            buttons.forEach((button, index) => button.onclick = () => {
+                const result = results.add({option_id: options[index].id});
+                view.trigger('result', result, options[index]);
+            });
+        }""", {'maximum': maximum, 'perOption': per_option})
+
+    def test_count_dispatches_five_requests_while_first_is_pending(self):
+        self.render_pending_legacy()
+        requests = []
+        self.page.on('request', lambda request: requests.append(request.post_data_json)
+                     if request.url.endswith('/responses') else None)
+        self.watcher.count = 5
+        started = time.perf_counter()
+        self.watcher.tick()
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 0.5, f'Five concurrent submissions took {elapsed:.3f}s')
+        state = self.page.evaluate('({dispatches: window.dispatches, completed: window.completed})')
+        self.assertEqual(len(state['dispatches']), 5)
+        self.assertEqual(state['completed'], 0)
+        self.assertLess(state['dispatches'][-1]['time'] - state['dispatches'][0]['time'], 500)
+        self.page.wait_for_function('window.completed === 5')
+        self.assertEqual(requests, [{'option_id': 1}] * 5)
+        self.assertEqual(self.watcher.attempted, 5)
+        self.watcher.tick()
+        self.assertEqual(len(self.page.evaluate('window.dispatches')), 5)
+
+    def test_count_batches_dispatch_concurrently_and_stop_at_total(self):
+        self.render_pending_legacy()
+        watcher = Watcher(self.page, 'http://localhost/polls', self.watcher.history,
+                          count_batches=(5, 3))
+        requests = []
+        self.page.on('request', lambda request: requests.append(request.post_data_json)
+                     if request.url.endswith('/responses') else None)
+        started = time.perf_counter()
+        for total in (5, 10, 15):
+            watcher.tick()
+            self.assertEqual(watcher.attempted, total)
+            self.assertEqual(len(self.page.evaluate('window.dispatches')), total)
+        self.assertLess(time.perf_counter() - started, 0.5)
+        self.assertEqual(self.page.evaluate('window.completed'), 0)
+        watcher.tick()
+        self.assertEqual(watcher.attempted, 15)
+        self.page.wait_for_function('window.completed === 15')
+        self.assertEqual(requests, [{'option_id': 1}] * 15)
+
+    def test_count_batches_respect_response_limit_between_batches(self):
+        self.render_pending_legacy(maximum=7)
+        watcher = Watcher(self.page, 'http://localhost/polls', self.watcher.history,
+                          count_batches=(5, 3))
+        for _ in range(4):
+            watcher.tick()
+        self.assertEqual(watcher.attempted, 7)
+        self.assertEqual(len(self.page.evaluate('window.dispatches')), 7)
+
+    def test_count_app_path_respects_total_and_per_option_limits(self):
+        for maximum, per_option, expected in ((1, 0, 1), (0, 2, 2), (3, 4, 3)):
+            with self.subTest(maximum=maximum, per_option=per_option):
+                self.render_pending_legacy(maximum, per_option)
+                watcher = Watcher(self.page, 'http://localhost/polls', self.watcher.history, count=5)
+                watcher.tick()
+                self.assertEqual(watcher.attempted, expected)
+                self.assertEqual(len(self.page.evaluate('window.dispatches')), expected)
+
+    def test_count_app_path_stops_on_locked_model(self):
+        self.render_pending_legacy()
+        self.page.evaluate("document.querySelector('legacy-response-view').responseView.model.isStarted = () => false")
+        self.watcher.count = 5
+        self.watcher.tick()
+        self.assertEqual(self.watcher.attempted, 0)
+        self.assertEqual(self.page.evaluate('window.dispatches'), [])
+
+    def test_count_app_path_stops_if_dom_locks_while_pending(self):
+        self.render_pending_legacy()
+        self.page.evaluate("""() => {
+            const view = document.querySelector('legacy-response-view').responseView.view;
+            const submit = view.trigger;
+            view.trigger = (...args) => {
+                submit(...args);
+                document.querySelector('.component-response-header__status').innerText = 'This poll is locked.';
+            };
+        }""")
+        self.watcher.count = 5
+        self.watcher.tick()
+        self.assertEqual(self.watcher.attempted, 1)
+        self.assertEqual(len(self.page.evaluate('window.dispatches')), 1)
 
 
 if __name__ == '__main__':

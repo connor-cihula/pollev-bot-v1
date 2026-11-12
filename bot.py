@@ -95,7 +95,57 @@ SNAPSHOT = r"""cfg => {
         legacy.querySelector('.component-response-header__status')?.innerText || '');
     return {status: 'poll', id, question: q.innerText.trim(), legacy: !!legacy, confirmed: !!confirmed,
         options: usable, answered: confirmed || usable.some(o => o.selected),
-        disabled: !!locked || usable[0].disabled};
+        locked: !!locked, disabled: !!locked || usable[0].disabled};
+}"""
+
+# The legacy responseView's button handler adds a result then triggers 'result'
+# on its view. The view's listener marks it pending and saves it. Calling that
+# same path directly permits concurrent requests; further DOM clicks are blocked
+# while ANY result is pending, even on polls allowing multiple responses.
+COUNT_BURST = r"""({cfg, expected, limit}) => {
+    const snapshot = (""" + SNAPSHOT + r""");
+    const identity = p => JSON.stringify(p.id ? ['id', p.id] :
+        ['content', p.question, p.options.map(o => o.text)]);
+    const wanted = identity(expected);
+    let attempted = 0;
+    let transport = 'click';
+    const started = performance.now();
+    while (attempted < limit) {
+        const current = snapshot(cfg);
+        if (current.status !== 'poll' || !current.legacy || current.locked || identity(current) !== wanted) break;
+        const root = [...document.querySelectorAll(cfg.root)].find(e =>
+            [...e.getClientRects()].some(r => r.width > 0 && r.height > 0) &&
+            getComputedStyle(e).visibility !== 'hidden');
+        const button = root?.querySelectorAll(cfg.options)[current.options[0].index];
+        if (!button?.isConnected) break;
+        const response = button.closest('legacy-response-view')?.responseView;
+        const model = response?.model;
+        const option = model?.mcpOptions?.at?.(current.options[0].index);
+        if (model?.type?.() === 'multiple_choice_poll' && option?.id != null &&
+            typeof model.isStarted === 'function' && typeof model.isWebEnabled === 'function' &&
+            typeof model.results?.add === 'function' && typeof model.results?.filter === 'function' &&
+            typeof response.view?.trigger === 'function') {
+            transport = 'app';
+            // Respect actual poll limits. Only the pending-request UI guard is
+            // bypassed; closed polls, total caps and per-option caps still stop.
+            if (!model.isStarted() || !model.isWebEnabled() || model.isMaxedOut?.()) break;
+            const maximum = Number(model.get('max_votes') || 0);
+            const perOption = Number(model.get('responses_per_option') ||
+                model.get('type_options')?.responses_per_option || 0);
+            if (maximum && model.results.length >= maximum) break;
+            if (perOption && model.results.filter(r => r.get('option_id') === option.id).length >= perOption) break;
+            const pending = model.results.filter(r => r.has('isPending')).length > 0;
+            if (current.disabled && !pending) break;
+            attempted++;
+            const result = model.results.add({option_id: option.id});
+            response.view.trigger('result', result, option);
+        } else {
+            if (current.disabled || button.disabled || button.getAttribute('aria-disabled') === 'true') break;
+            attempted++;
+            button.click();
+        }
+    }
+    return {attempted, elapsed_ms: performance.now() - started, transport};
 }"""
 
 
@@ -130,9 +180,13 @@ class History:
 
 
 class Watcher:
-    def __init__(self, page, url: str, history: History, repeat=False):
+    def __init__(self, page, url: str, history: History, repeat=False, count=None, count_batches=None):
         self.page, self.url, self.history = page, url, history
         self.repeat = repeat
+        self.batch_size = count_batches[0] if count_batches is not None else None
+        self.batches = count_batches[1] if count_batches is not None else None
+        self.count = self.batch_size * self.batches if count_batches is not None else count
+        self.count_attempts = {}
         self.reported = set()
         self.last_reason = None
         self.attempted = self.confirmed = 0
@@ -154,13 +208,28 @@ class Watcher:
             return
         self.last_reason = None
         key = poll_key(self.url, poll)
-        if not self.repeat and key in self.history.entries:
+        multiple = self.repeat or self.count is not None
+        attempt_number = None
+        if self.count is not None:
+            # A new run is an explicit request for a fresh batch. Retain the
+            # per-poll cap across page reloads and revisits within this run.
+            attempt_number = self.count_attempts.get(key, 0) + 1
+            if attempt_number > self.count:
+                return
+        if not multiple and key in self.history.entries:
             return
-        if not self.repeat and poll['answered']:
+        if not multiple and poll['answered']:
             self.history.record(key, 'already-answered')
             if key not in self.reported:
                 LOG.info('Skipping already-answered poll')
                 self.reported.add(key)
+            return
+        if self.count is not None and poll.get('legacy'):
+            # Batch mode can continue while earlier requests are pending. The
+            # browser handler still checks locks and actual response limits.
+            if poll.get('locked') or (poll['disabled'] and self.batch_size is None):
+                return
+            self.count_burst(key, poll)
             return
         if poll['disabled']:
             return
@@ -170,16 +239,18 @@ class Watcher:
         handle = option.element_handle()
         fresh = self.snapshot()
         if (not handle or fresh['status'] != 'poll' or poll_key(self.url, fresh) != key
-                or (fresh['answered'] and not self.repeat) or fresh['disabled']):
+                or (fresh['answered'] and not multiple) or fresh['disabled']):
             return
-        # Persist BEFORE the click. A timeout may occur after the server accepted
-        # the vote, so neither reconnection nor restart may automatically retry.
+        # Reserve BEFORE the click: a timeout may follow an accepted vote.
+        # Default mode persists its guard; count mode reserves a session slot.
         if key not in self.history.entries:
             self.history.record(key, 'attempted')
+        if attempt_number is not None:
+            self.count_attempts[key] = attempt_number
         self.attempted += 1
         if handle.evaluate("e => e.tagName === 'INPUT' && e.type === 'radio'"):
             if handle.is_visible():
-                if self.repeat:
+                if multiple:
                     handle.click(timeout=3000)
                 else:
                     handle.check(timeout=3000)
@@ -200,9 +271,14 @@ class Watcher:
                 current = self.snapshot()
                 if submit_handle and current['status'] == 'poll' and poll_key(self.url, current) == key:
                     submit_handle.click(timeout=3000)
-        if self.repeat:
+        if multiple:
             # Don't serialize repeated clicks behind a three-second confirmation
             # wait. A click is an attempt, not proof of a distinct server response.
+            if self.count is not None:
+                LOG.info('First-answer attempt %s/%d; server acceptance unconfirmed',
+                         attempt_number, self.count)
+                if attempt_number == self.count:
+                    LOG.info('Count complete for this poll; waiting for a new poll')
             return
         # Checked radios alone are not proof the server accepted the response.
         try:
@@ -220,13 +296,48 @@ class Watcher:
             pass
         LOG.info('First-answer attempt complete; acceptance unconfirmed, will not retry')
 
+    def count_burst(self, key, poll):
+        used = self.count_attempts.get(key, 0)
+        remaining = self.count - used
+        if self.batch_size is not None:
+            remaining = min(remaining, self.batch_size - used % self.batch_size)
+        if key not in self.history.entries:
+            self.history.record(key, 'attempted')
+        # If the browser call fails after dispatch, do not repeat an uncertain
+        # batch. A successful result releases slots that were never clicked.
+        self.count_attempts[key] = used + remaining
+        self.attempted += remaining
+        started = time.perf_counter()
+        result = self.page.evaluate(COUNT_BURST, {
+            'cfg': SELECTORS, 'expected': poll, 'limit': remaining,
+        })
+        sent = result['attempted']
+        self.count_attempts[key] = used + sent
+        self.attempted -= remaining - sent
+        LOG.info('First-answer burst via %s: %d attempts in %.1f ms (browser %.1f ms); '
+                 '%d/%d this run; server acceptance unconfirmed',
+                 result['transport'], sent, (time.perf_counter() - started) * 1000,
+                 result['elapsed_ms'], used + sent, self.count)
+        if self.batch_size is not None and sent:
+            LOG.info('Batch %d/%d: %d/%d attempts dispatched',
+                     used // self.batch_size + 1, self.batches,
+                     used % self.batch_size + sent, self.batch_size)
+        if used + sent == self.count:
+            LOG.info('Count complete for this poll; waiting for a new poll')
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', required=True, help='Poll Everywhere participant URL')
     parser.add_argument('--interval', type=float, default=2, help='Seconds between checks (default: 2)')
-    parser.add_argument('--repeat', nargs='?', type=int, const=20, default=None,
-                        metavar='N', help='Repeat first-answer attempts N times per second (default: 20) until Ctrl+C')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--repeat', nargs='?', type=int, const=20, default=None,
+                      metavar='N', help='Repeat first-answer attempts N times per second (default: 20) until Ctrl+C')
+    mode.add_argument('--count', type=int, default=None, metavar='N',
+                      help='Attempt the first answer N times per poll per run with no added delay')
+    mode.add_argument('--count_batches', type=int, nargs=2, default=None,
+                      metavar=('SIZE', 'BATCHES'),
+                      help='Send SIZE first-answer attempts at once, BATCHES times per poll per run, with no added delay')
     args = parser.parse_args(argv)
     parts = urlsplit(args.url)
     if parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password:
@@ -236,6 +347,10 @@ def parse_args(argv=None):
         parser.error('--interval must be finite and at least 0.5 seconds')
     if args.repeat is not None and args.repeat < 1:
         parser.error('--repeat N must be a positive integer')
+    if args.count is not None and args.count < 1:
+        parser.error('--count N must be a positive integer')
+    if args.count_batches is not None and any(value < 1 for value in args.count_batches):
+        parser.error('--count_batches SIZE BATCHES requires two positive integers')
     return args
 
 
@@ -268,8 +383,15 @@ def main(argv=None):
                 except BrowserError as error:
                     LOG.warning('Initial navigation incomplete: %s', error.message.splitlines()[0])
                 input('Finish login and open the participant page, then press Enter here to monitor: ')
-                watcher = Watcher(page, args.url, history, repeat=args.repeat is not None)
-                if args.repeat is None:
+                watcher = Watcher(page, args.url, history, repeat=args.repeat is not None,
+                                  count=args.count, count_batches=args.count_batches)
+                if args.count_batches is not None:
+                    LOG.info('Sending %d batches of %d first-answer attempts per poll (%d total) with no added delay; monitoring until Ctrl+C',
+                             watcher.batches, watcher.batch_size, watcher.count)
+                elif args.count is not None:
+                    LOG.info('Attempting first answer up to %d times per poll with no added delay; monitoring until Ctrl+C',
+                             args.count)
+                elif args.repeat is None:
                     LOG.info('Monitoring until Ctrl+C')
                 else:
                     LOG.info('Repeating first-answer attempts at up to %d/second until Ctrl+C', args.repeat)
@@ -277,6 +399,7 @@ def main(argv=None):
                 slot = time.monotonic()
                 failures = 0
                 while not page.is_closed():
+                    attempted_before = watcher.attempted
                     try:
                         watcher.tick()
                         failures = 0
@@ -287,6 +410,10 @@ def main(argv=None):
                         LOG.warning('Browser error%s: %s',
                                     '; pausing repeat attempts' if watcher.repeat else '; any recorded attempt will not be retried',
                                     error.message.splitlines()[0])
+                    if watcher.count is not None and not failures and watcher.attempted > attempted_before:
+                        # Send the next count attempt immediately. Idle polls and
+                        # errors still wait, so monitoring does not busy-loop.
+                        continue
                     if args.repeat is not None and not failures:
                         slot = next_repeat_slot(slot, time.monotonic(), period)
                         delay = max(0, slot - time.monotonic())
@@ -320,8 +447,8 @@ def main(argv=None):
         return 1
     finally:
         if watcher:
-            if watcher.repeat:
-                LOG.info('Session: %d repeat attempts; server acceptance not counted', watcher.attempted)
+            if watcher.repeat or watcher.count is not None:
+                LOG.info('Session: %d first-answer attempts; server acceptance not counted', watcher.attempted)
             else:
                 LOG.info('Session: %d attempts, %d visibly confirmed', watcher.attempted, watcher.confirmed)
     return 0

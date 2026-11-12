@@ -52,6 +52,43 @@ Terminate with ^C.
 
 - `--interval <number>`: replace <number> with an int. Default is checking every 2 seconds.
 
+- `--count N`: attempt the first answer exactly N times per poll when it stays enabled. For five attempts:
+
+```sh
+.venv/bin/python bot.py --url https://pollev.com/kyragan244 --count 5
+```
+
+Attempts run back to back with no added delay, as fast as the page accepts clicks.
+For the legacy Poll Everywhere page, the batch calls the app's existing result
+submission handler inside one browser call. Requests start together instead of
+waiting for the page to re-enable its buttons after every response. Poll locks,
+total response limits, and per-option limits are still checked. If the app's
+model is unavailable, it falls back to clicks. Logs identify the path (`app` or
+`click`) and report dispatch time in milliseconds; server processing may finish later.
+`--interval` only controls idle monitoring and waiting after errors in this mode.
+After reaching the count, the bot waits for a new poll and applies the same count there. Other answers are
+untouched. Locked polls and disabled answers pause attempts. Each run starts a
+fresh batch: restarting with `--count 5` attempts another five on the same poll.
+Within a run, reloading or revisiting a poll does not reset its count. Earlier
+saved count history does not block a new batch. This mode can run on an
+already-answered poll. A failed or uncertain click consumes one
+attempt. Logs count attempts, not confirmed accepted responses; a poll must allow
+multiple responses to record multiple votes. `--count` and `--repeat` cannot be
+combined.
+
+- `--count_batches SIZE BATCHES`: send `SIZE` attempts at once, repeated `BATCHES`
+  times, to the first answer of each poll. For three batches of five (15 total):
+
+```sh
+.venv/bin/python bot.py --url https://pollev.com/kyragan244 --count_batches 5 3
+```
+
+Both numbers must be positive integers. Batches run consecutively with no added
+delay and do not wait for previous requests to finish. The legacy app handler
+still checks poll locks and response limits. Logs show each batch's progress.
+Each run starts fresh, just like `--count`. Use only one of `--count_batches`,
+`--count`, or `--repeat` at a time.
+
 - `--repeat [number]`: keep voting the first answer til you ^C it. Default is 20 attempts per second, or use `--repeat 5` for 5 per second. Keeps going on the same poll and follows new ones too. Untested.
 
 ```sh
